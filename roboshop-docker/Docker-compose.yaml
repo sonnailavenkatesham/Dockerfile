@@ -17,12 +17,10 @@ services:
       - mongodb
 
   redis:
-    image: redis
+    image: redis:v1
     container_name: redis
     networks:
       - roboshop
-    depends_on:
-      - user
   user:
     image: user:v1
     container_name: user
