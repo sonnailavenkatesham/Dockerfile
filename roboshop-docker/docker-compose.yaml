@@ -17,17 +17,17 @@ services:
     depends_on:
     - mongodb
 
-  redis:
-    image: redis
-    container_name: redis
-    networks:
-      - roboshop
+  # redis:
+  #   image: redis
+  #   container_name: redis
+  #   networks:
+  #     - roboshop
       
-  user:
-    image: user:v1
-    container_name: user
-    networks:
-      - roboshop
+  # user:
+  #   image: user:v1
+  #   container_name: user
+  #   networks:
+  #     - roboshop
 
   web:
     image: web:v1
