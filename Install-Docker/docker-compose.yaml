@@ -4,8 +4,6 @@ networks:
 volumes:
   mongodb:
   redis:
-  mysql:
-  rabbitmq:
 services:
   mongodb:
     image: joindevops/mongodb:v1
@@ -40,52 +38,6 @@ services:
     depends_on:
       - mongodb
       - redis
-  cart:
-    image: joindevops/cart:v1
-    container_name: cart
-    networks:
-      - roboshop
-    depends_on:
-      - redis
-      - catalogue
-  mysql:
-    image: joindevops/mysql:v1
-    container_name: mysql
-    networks:
-      - roboshop
-    volumes:
-    - source: mysql
-      target: /var/lib/mysql
-      type: volume
-  shipping:
-    image: joindevops/shipping:v1
-    container_name: shipping
-    networks:
-      - roboshop
-    depends_on:
-      - cart
-      - mysql
-  rabbitmq:
-    image: rabbitmq
-    container_name: rabbitmq
-    networks:
-      - roboshop
-    volumes:
-    - source: rabbitmq
-      target: /var/lib/rabbitmq
-      type: volume
-    environment:
-    - RABBITMQ_DEFAULT_USER=roboshop
-    - RABBITMQ_DEFAULT_PASS=roboshop123
-  payment:
-    image: joindevops/payment:v1
-    container_name: payment
-    networks:
-      - roboshop
-    depends_on:
-      - cart
-      - user
-      - rabbitmq
   web:
     image: joindevops/web:v1
     container_name: web
@@ -96,6 +48,3 @@ services:
     depends_on:
     - catalogue
     - user
-    - cart
-    - shipping
-    - payment
