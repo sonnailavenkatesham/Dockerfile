@@ -1,45 +1,36 @@
 networks:
   roboshop:
     driver: bridge
-volumes:
-  mongodb:
-  redis:
 services:
+
   mongodb:
-    image: joindevops/mongodb:v1
+    image: mongodb:v1
     container_name: mongodb
     networks:
       - roboshop
-    volumes:
-    - source: mongodb
-      target: /data/db
-      type: volume
+
   catalogue:
-    image: joindevops/catalogue:v1
+    image: catalogue:v1
     container_name: catalogue
     networks:
     - roboshop
     depends_on:
     - mongodb
+
   redis:
     image: redis
     container_name: redis
     networks:
       - roboshop
-    volumes:
-    - source: redis
-      target: /data
-      type: volume
+      
   user:
-    image: joindevops/user:v1
+    image: user:v1
     container_name: user
     networks:
       - roboshop
-    depends_on:
-      - mongodb
-      - redis
+
   web:
-    image: joindevops/web:v1
+    image: web:v1
     container_name: web
     networks:
     - roboshop
