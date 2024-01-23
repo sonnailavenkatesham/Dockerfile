@@ -28,6 +28,7 @@ services:
       - roboshop
     depends_on:
       - redis
+      - mongodb
   web:
     image: web:v1
     container_name: web
