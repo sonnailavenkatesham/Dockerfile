@@ -38,6 +38,7 @@ services:
       - roboshop
     depends_on:
       - redis
+      - catalogue
   
   web:
     image: web:v1
