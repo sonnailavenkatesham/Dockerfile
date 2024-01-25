@@ -38,7 +38,7 @@ services:
     networks:
       - roboshop
     ports:
-      - "8080"
+      - "80:80"
     depends_on:
       - catalogue
       - user
