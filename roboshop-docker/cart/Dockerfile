@@ -1,0 +1,7 @@
+FROM node:14
+EXPOSE 8080
+RUN adduser roboshop
+WORKDIR /app
+RUN npm install -y
+COPY server.js .
+CMD [ "node", "server.js" ]
