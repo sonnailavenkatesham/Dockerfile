@@ -37,6 +37,8 @@ services:
     container_name: web
     networks:
       - roboshop
+    ports:
+      - "8080"
     depends_on:
       - catalogue
       - user
