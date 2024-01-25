@@ -1,9 +1,26 @@
-const mongoClient = require('mongodb').MongoClient;
-const mongoObjectID = require('mongodb').ObjectID;
+const redis = require('redis');
+const request = require('request');
 const bodyParser = require('body-parser');
 const express = require('express');
 const pino = require('pino');
 const expPino = require('express-pino-logger');
+// Prometheus
+const promClient = require('prom-client');
+const Registry = promClient.Registry;
+const register = new Registry();
+const counter = new promClient.Counter({
+    name: 'items_added',
+    help: 'running count of items added to cart',
+    registers: [register]
+});
+
+
+var redisConnected = false;
+
+var redisHost = process.env.REDIS_HOST || 'redis'
+var catalogueHost = process.env.CATALOGUE_HOST || 'catalogue'
+var cataloguePort = process.env.CATALOGUE_PORT || '8080'
+
 
 const logger = pino({
     level: 'info',
@@ -13,11 +30,6 @@ const logger = pino({
 const expLogger = expPino({
     logger: logger
 });
-
-// MongoDB
-var db;
-var collection;
-var mongoConnected = false;
 
 const app = express();
 
@@ -35,159 +47,340 @@ app.use(bodyParser.json());
 app.get('/health', (req, res) => {
     var stat = {
         app: 'OK',
-        mongo: mongoConnected
+        redis: redisConnected
     };
     res.json(stat);
 });
 
-// all products
-app.get('/products', (req, res) => {
-    if(mongoConnected) {
-        collection.find({}).toArray().then((products) => {
-            res.json(products);
-        }).catch((e) => {
-            req.log.error('ERROR', e);
-            res.status(500).send(e);
-        });
-    } else {
-        req.log.error('database not available');
-        res.status(500).send('database not avaiable');
-    }
+// Prometheus
+app.get('/metrics', (req, res) => {
+    res.header('Content-Type', 'text/plain');
+    res.send(register.metrics());
 });
 
-// product by SKU
-app.get('/product/:sku', (req, res) => {
-    if(mongoConnected) {
-        // optionally slow this down
-        const delay = process.env.GO_SLOW || 0;
-        setTimeout(() => {
-        collection.findOne({sku: req.params.sku}).then((product) => {
-            req.log.info('product', product);
-            if(product) {
-                res.json(product);
+
+// get cart with id
+app.get('/cart/:id', (req, res) => {
+    redisClient.get(req.params.id, (err, data) => {
+        if(err) {
+            req.log.error('ERROR', err);
+            res.status(500).send(err);
+        } else {
+            if(data == null) {
+                res.status(404).send('cart not found');
             } else {
-                res.status(404).send('SKU not found');
+                res.set('Content-Type', 'application/json');
+                res.send(data);
             }
-        }).catch((e) => {
-            req.log.error('ERROR', e);
-            res.status(500).send(e);
-        });
-        }, delay);
-    } else {
-        req.log.error('database not available');
-        res.status(500).send('database not available');
-    }
+        }
+    });
 });
 
-// products in a category
-app.get('/products/:cat', (req, res) => {
-    if(mongoConnected) {
-        collection.find({ categories: req.params.cat }).sort({ name: 1 }).toArray().then((products) => {
-            if(products) {
-                res.json(products);
+// delete cart with id
+app.delete('/cart/:id', (req, res) => {
+    redisClient.del(req.params.id, (err, data) => {
+        if(err) {
+            req.log.error('ERROR', err);
+            res.status(500).send(err);
+        } else {
+            if(data == 1) {
+                res.send('OK');
             } else {
-                res.status(404).send('No products for ' + req.params.cat);
+                res.status(404).send('cart not found');
             }
-        }).catch((e) => {
-            req.log.error('ERROR', e);
-            res.status(500).send(e);
+        }
+    });
+});
+
+// rename cart i.e. at login
+app.get('/rename/:from/:to', (req, res) => {
+    redisClient.get(req.params.from, (err, data) => {
+        if(err) {
+            req.log.error('ERROR', err);
+            res.status(500).send(err);
+        } else {
+            if(data == null) {
+                res.status(404).send('cart not found');
+            } else {
+                var cart = JSON.parse(data);
+                saveCart(req.params.to, cart).then((data) => {
+                    res.json(cart);
+                }).catch((err) => {
+                    req.log.error(err);
+                    res.status(500).send(err);
+                });
+            }
+        }
+    });
+});
+
+// update/create cart
+app.get('/add/:id/:sku/:qty', (req, res) => {
+    // check quantity
+    var qty = parseInt(req.params.qty);
+    if(isNaN(qty)) {
+        req.log.warn('quantity not a number');
+        res.status(400).send('quantity must be a number');
+        return;
+    } else if(qty < 1) {
+        req.log.warn('quantity less than one');
+        res.status(400).send('quantity has to be greater than zero');
+        return;
+    }
+
+    // look up product details
+    getProduct(req.params.sku).then((product) => {
+        req.log.info('got product', product);
+        if(!product) {
+            res.status(404).send('product not found');
+            return;
+        }
+        // is the product in stock?
+        if(product.instock == 0) {
+            res.status(404).send('out of stock');
+            return;
+        }
+        // does the cart already exist?
+        redisClient.get(req.params.id, (err, data) => {
+            if(err) {
+                req.log.error('ERROR', err);
+                res.status(500).send(err);
+            } else {
+                var cart;
+                if(data == null) {
+                    // create new cart
+                    cart = {
+                        total: 0,
+                        tax: 0,
+                        items: []
+                    };
+                } else {
+                    cart = JSON.parse(data);
+                }
+                req.log.info('got cart', cart);
+                // add sku to cart
+                var item = {
+                    qty: qty,
+                    sku: req.params.sku,
+                    name: product.name,
+                    price: product.price,
+                    subtotal: qty * product.price
+                };
+                var list = mergeList(cart.items, item, qty);
+                cart.items = list;
+                cart.total = calcTotal(cart.items);
+                // work out tax
+                cart.tax = calcTax(cart.total);
+
+                // save the new cart
+                saveCart(req.params.id, cart).then((data) => {
+                    counter.inc(qty);
+                    res.json(cart);
+                }).catch((err) => {
+                    req.log.error(err);
+                    res.status(500).send(err);
+                });
+            }
         });
+    }).catch((err) => {
+        req.log.error(err);
+        res.status(500).send(err);
+    });
+});
+
+// update quantity - remove item when qty == 0
+app.get('/update/:id/:sku/:qty', (req, res) => {
+    // check quantity
+    var qty = parseInt(req.params.qty);
+    if(isNaN(qty)) {
+        req.log.warn('quanity not a number');
+        res.status(400).send('quantity must be a number');
+        return;
+    } else if(qty < 0) {
+        req.log.warn('quantity less than zero');
+        res.status(400).send('negative quantity not allowed');
+        return;
+    }
+
+    // get the cart
+    redisClient.get(req.params.id, (err, data) => {
+        if(err) {
+            req.log.error('ERROR', err);
+            res.status(500).send(err);
+        } else {
+            if(data == null) {
+                res.status(404).send('cart not found');
+            } else {
+                var cart = JSON.parse(data);
+                var idx;
+                var len = cart.items.length;
+                for(idx = 0; idx < len; idx++) {
+                    if(cart.items[idx].sku == req.params.sku) {
+                        break;
+                    }
+                }
+                if(idx == len) {
+                    // not in list
+                    res.status(404).send('not in cart');
+                } else {
+                    if(qty == 0) {
+                        cart.items.splice(idx, 1);
+                    } else {
+                        cart.items[idx].qty = qty;
+                        cart.items[idx].subtotal = cart.items[idx].price * qty;
+                    }
+                    cart.total = calcTotal(cart.items);
+                    // work out tax
+                    cart.tax = calcTax(cart.total);
+                    saveCart(req.params.id, cart).then((data) => {
+                        res.json(cart);
+                    }).catch((err) => {
+                        req.log.error(err);
+                        res.status(500).send(err);
+                    });
+                }
+            }
+        }
+    });
+});
+
+// add shipping
+app.post('/shipping/:id', (req, res) => {
+    var shipping = req.body;
+    if(shipping.distance === undefined || shipping.cost === undefined || shipping.location == undefined) {
+        req.log.warn('shipping data missing', shipping);
+        res.status(400).send('shipping data missing');
     } else {
-        req.log.error('database not available');
-        res.status(500).send('database not avaiable');
+        // get the cart
+        redisClient.get(req.params.id, (err, data) => {
+            if(err) {
+                req.log.error('ERROR', err);
+                res.status(500).send(err);
+            } else {
+                if(data == null) {
+                    req.log.info('no cart for', req.params.id);
+                    res.status(404).send('cart not found');
+                } else {
+                    var cart = JSON.parse(data);
+                    var item = {
+                        qty: 1,
+                        sku: 'SHIP',
+                        name: 'shipping to ' + shipping.location,
+                        price: shipping.cost,
+                        subtotal: shipping.cost
+                    };
+                    // check shipping already in the cart
+                    var idx;
+                    var len = cart.items.length;
+                    for(idx = 0; idx < len; idx++) {
+                        if(cart.items[idx].sku == item.sku) {
+                            break;
+                        }
+                    }
+                    if(idx == len) {
+                        // not already in cart
+                        cart.items.push(item);
+                    } else {
+                        cart.items[idx] = item;
+                    }
+                    cart.total = calcTotal(cart.items);
+                    // work out tax
+                    cart.tax = calcTax(cart.total);
+
+                    // save the updated cart
+                    saveCart(req.params.id, cart).then((data) => {
+                        res.json(cart);
+                    }).catch((err) => {
+                        req.log.error(err);
+                        res.status(500).send(err);
+                    });
+                }
+            }
+        });
     }
 });
 
-// all categories
-app.get('/categories', (req, res) => {
-    if(mongoConnected) {
-        collection.distinct('categories').then((categories) => {
-            res.json(categories);
-        }).catch((e) => {
-            req.log.error('ERROR', e);
-            res.status(500).send(e);
-        });
-    } else {
-        req.log.error('database not available');
-        res.status(500).send('database not available');
+function mergeList(list, product, qty) {
+    var inlist = false;
+    // loop through looking for sku
+    var idx;
+    var len = list.length;
+    for(idx = 0; idx < len; idx++) {
+        if(list[idx].sku == product.sku) {
+            inlist = true;
+            break;
+        }
     }
-});
 
-// search name and description
-app.get('/search/:text', (req, res) => {
-    if(mongoConnected) {
-        collection.find({ '$text': { '$search': req.params.text }}).toArray().then((hits) => {
-            res.json(hits);
-        }).catch((e) => {
-            req.log.error('ERROR', e);
-            res.status(500).send(e);
-        });
+    if(inlist) {
+        list[idx].qty += qty;
+        list[idx].subtotal = list[idx].price * list[idx].qty;
     } else {
-        req.log.error('database not available');
-        res.status(500).send('database not available');
+        list.push(product);
     }
-});
 
-if (process.env.MONGO == 'true') {
-// set up Mongo
-function mongoConnect() {
+    return list;
+}
+
+function calcTotal(list) {
+    var total = 0;
+    for(var idx = 0, len = list.length; idx < len; idx++) {
+        total += list[idx].subtotal;
+    }
+
+    return total;
+}
+
+function calcTax(total) {
+    // tax @ 20%
+    return (total - (total / 1.2));
+}
+
+function getProduct(sku) {
     return new Promise((resolve, reject) => {
-        var mongoURL = process.env.MONGO_URL || 'mongodb://mongodb:27017/catalogue';
-        mongoClient.connect(mongoURL, (error, client) => {
-            if(error) {
-                reject(error);
+        request('http://' + catalogueHost + ':' + cataloguePort +'/product/' + sku, (err, res, body) => {
+            if(err) {
+                reject(err);
+            } else if(res.statusCode != 200) {
+                resolve(null);
             } else {
-                db = client.db('catalogue');
-                collection = db.collection('products');
-                resolve('connected');
+                // return object - body is a string
+                // TODO - catch parse error
+                resolve(JSON.parse(body));
             }
         });
     });
 }
-}
 
-if (process.env.DOCUMENTDB == 'true') {
-function mongoConnect() {
+function saveCart(id, cart) {
+    logger.info('saving cart', cart);
     return new Promise((resolve, reject) => {
-    var mongoURL = process.env.MONGO_URL || 'mongodb://username:password@mongodb:27017/catalogue?tls=true&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false';
-    var client = mongoClient.connect(mongoURL,
-      {
-        // Mutable & Immutable
-        //tlsCAFile: `/home/roboshop/catalogue/rds-combined-ca-bundle.pem` //Specify the DocDB; cert
-        // Container
-        tlsCAFile: `/app/rds-combined-ca-bundle.pem` //Specify the DocDB; cert
-    }, (error, client) => {
-    if(error) {
-        reject(error);
-    } else {
-        db = client.db('catalogue');
-        collection = db.collection('products');
-        resolve('connected');
-    }
-});
-});
-}
-}
-
-
-// mongodb connection retry loop
-function mongoLoop() {
-    mongoConnect().then((r) => {
-        mongoConnected = true;
-        logger.info('MongoDB connected');
-    }).catch((e) => {
-        logger.error('ERROR', e);
-        setTimeout(mongoLoop, 2000);
+        redisClient.setex(id, 3600, JSON.stringify(cart), (err, data) => {
+            if(err) {
+                reject(err);
+            } else {
+                resolve(data);
+            }
+        });
     });
 }
 
-mongoLoop();
+// connect to Redis
+var redisClient = redis.createClient({
+    host: redisHost
+});
+
+redisClient.on('error', (e) => {
+    logger.error('Redis ERROR', e);
+});
+redisClient.on('ready', (r) => {
+    logger.info('Redis READY', r);
+    redisConnected = true;
+});
 
 // fire it up!
-const port = process.env.CATALOGUE_SERVER_PORT || '8080';
-const MONGO = process.env.MONGO || 'false';
-const DOCUMENTDB = process.env.DOCUMENTDB || 'false';
-
+const port = process.env.CART_SERVER_PORT || '8080';
 app.listen(port, () => {
     logger.info('Started on port', port);
 });
+
