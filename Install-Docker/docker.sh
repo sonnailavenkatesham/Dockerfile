@@ -50,6 +50,14 @@ VALIDATE $? "Docker Enabled"
 
 usermod -aG docker centos &>>$LOGFILE
 
+sudo curl -L "https://github.com/docker/compose/releases/download/1.27.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+
+VALIDATE $? "Docker-compose installation"
+
+sudo chmod +x /usr/local/bin/docker-compose
+
+VALIDATE $? "docker-compose-premission "
+
 VALIDATE $? "centos user added to docker group"
 
 echo -e "$R Please logout and login again $N"
