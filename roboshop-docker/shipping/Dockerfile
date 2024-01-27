@@ -2,12 +2,12 @@
 
 #build stage
 FROM debian:10 AS build
-RUN apt-get update && apt-get install maven -y
+RUN apt-get update && apt-get -y install maven
 
 WORKDIR /app
-COPY pom.xml .
+COPY pom.xml /app
 RUN mvn dependency:resolve
-COPY src /app/src
+COPY src /app/src/
 RUN mvn package
 
 # run stage
